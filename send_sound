@@ -17,6 +17,9 @@ NOTIFY_UUID   = "12345678-1234-5678-1234-56789abcdef2"  # app confirms here
 CHUNK_SIZE    = 512
 SOUNDS_DIR    = os.path.join(os.path.dirname(__file__), "sounds")
 
+def log(msg: str):
+    print(f"[send_sound] {msg}", file=sys.stderr)
+
 def find_sound_file(name: str) -> str | None:
     for ext in (".mp3", ".wav", ".aac"):
         path = os.path.join(SOUNDS_DIR, name + ext)
@@ -24,30 +27,47 @@ def find_sound_file(name: str) -> str | None:
             return path
     return None
 
-async def send_to_device(address: str, data: bytes) -> bool:
+async def send_to_device(address: str, name: str, data: bytes) -> bool:
     result = asyncio.Event()
     success = [False]
 
     def on_notify(_, value: bytearray):
+        msg = bytes(value).decode("utf-8", errors="replace")
+        log(f"  [{name}] confirmation reçue: {msg!r}")
         if value == b"ok":
             success[0] = True
         result.set()
 
     try:
-        async with BleakClient(address, timeout=10.0) as client:
+        log(f"  [{name}] Connexion à {address}...")
+        async with BleakClient(address, timeout=15.0) as client:
+            log(f"  [{name}] Connecté, MTU={client.mtu_size}")
+
             await client.start_notify(NOTIFY_UUID, on_notify)
 
             # Send chunks
-            for i in range(0, len(data), CHUNK_SIZE):
-                await client.write_gatt_char(WRITE_UUID, data[i:i + CHUNK_SIZE], response=True)
+            total = len(data)
+            sent = 0
+            for i in range(0, total, CHUNK_SIZE):
+                chunk = data[i:i + CHUNK_SIZE]
+                await client.write_gatt_char(WRITE_UUID, chunk, response=True)
+                sent += len(chunk)
+
+            log(f"  [{name}] {sent}/{total} octets envoyés, envoi END...")
 
             # Send END sentinel
             await client.write_gatt_char(WRITE_UUID, b"END", response=True)
 
-            # Wait for confirmation (max 10s)
-            await asyncio.wait_for(result.wait(), timeout=10.0)
+            # Wait for confirmation (max 30s — playback can take time)
+            log(f"  [{name}] En attente de confirmation (max 30s)...")
+            await asyncio.wait_for(result.wait(), timeout=30.0)
             await client.stop_notify(NOTIFY_UUID)
-    except Exception:
+
+    except asyncio.TimeoutError:
+        log(f"  [{name}] Timeout en attente de confirmation")
+        return False
+    except Exception as e:
+        log(f"  [{name}] Erreur: {type(e).__name__}: {e}")
         return False
 
     return success[0]
@@ -61,25 +81,48 @@ async def main():
     sound_path = find_sound_file(sound_name)
 
     if sound_path is None:
+        log(f"Aucun fichier trouvé pour '{sound_name}' dans {SOUNDS_DIR}")
         print("error")
         sys.exit(1)
 
     with open(sound_path, "rb") as f:
         data = f.read()
+    log(f"Fichier: {sound_path} ({len(data)} octets)")
 
     # Scan for devices advertising our service
+    log("Scan BLE en cours (5s)...")
     devices = await BleakScanner.discover(timeout=5.0, service_uuids=[SERVICE_UUID])
 
     if not devices:
+        log("Aucun appareil trouvé avec le service UUID")
+        log("Scan de debug (sans filtre UUID, 3s)...")
+        all_devices = await BleakScanner.discover(timeout=3.0)
+        if all_devices:
+            log(f"  {len(all_devices)} appareil(s) BLE visible(s):")
+            for d in all_devices:
+                uuids = d.metadata.get("uuids", []) if d.metadata else []
+                log(f"    - {d.name or '(inconnu)'} @ {d.address}  UUIDs={uuids}")
+        else:
+            log("  Aucun appareil BLE visible du tout")
         print("error")
         sys.exit(1)
 
+    log(f"{len(devices)} appareil(s) trouvé(s):")
+    for d in devices:
+        log(f"  - {d.name or '(inconnu)'} @ {d.address}")
+
     # Send to all devices concurrently
-    results = await asyncio.gather(*[send_to_device(d.address, data) for d in devices])
+    results = await asyncio.gather(*[
+        send_to_device(d.address, d.name or d.address, data)
+        for d in devices
+    ])
 
     if all(results):
+        log("Tous les envois réussis")
         print("success")
     else:
+        failed = sum(1 for r in results if not r)
+        log(f"{failed}/{len(results)} envoi(s) échoué(s)")
         print("error")
         sys.exit(1)
 

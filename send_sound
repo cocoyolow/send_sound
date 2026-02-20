@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""
+send_sound <sound_name>
+Scans for BLE devices advertising the sound service UUID,
+reads the sound file from sounds/, sends it in chunks,
+waits for confirmation, prints "success" or "error".
+"""
+
+import sys
+import asyncio
+import os
+from bleak import BleakScanner, BleakClient
+
+SERVICE_UUID  = "12345678-1234-5678-1234-56789abcdef0"
+WRITE_UUID    = "12345678-1234-5678-1234-56789abcdef1"  # CLI writes chunks here
+NOTIFY_UUID   = "12345678-1234-5678-1234-56789abcdef2"  # app confirms here
+CHUNK_SIZE    = 512
+SOUNDS_DIR    = os.path.join(os.path.dirname(__file__), "sounds")
+
+def find_sound_file(name: str) -> str | None:
+    for ext in (".mp3", ".wav", ".aac"):
+        path = os.path.join(SOUNDS_DIR, name + ext)
+        if os.path.isfile(path):
+            return path
+    return None
+
+async def send_to_device(address: str, data: bytes) -> bool:
+    result = asyncio.Event()
+    success = [False]
+
+    def on_notify(_, value: bytearray):
+        if value == b"ok":
+            success[0] = True
+        result.set()
+
+    try:
+        async with BleakClient(address, timeout=10.0) as client:
+            await client.start_notify(NOTIFY_UUID, on_notify)
+
+            # Send chunks
+            for i in range(0, len(data), CHUNK_SIZE):
+                await client.write_gatt_char(WRITE_UUID, data[i:i + CHUNK_SIZE], response=True)
+
+            # Send END sentinel
+            await client.write_gatt_char(WRITE_UUID, b"END", response=True)
+
+            # Wait for confirmation (max 10s)
+            await asyncio.wait_for(result.wait(), timeout=10.0)
+            await client.stop_notify(NOTIFY_UUID)
+    except Exception:
+        return False
+
+    return success[0]
+
+async def main():
+    if len(sys.argv) < 2:
+        print("Usage: send_sound <sound_name>", file=sys.stderr)
+        sys.exit(1)
+
+    sound_name = sys.argv[1]
+    sound_path = find_sound_file(sound_name)
+
+    if sound_path is None:
+        print("error")
+        sys.exit(1)
+
+    with open(sound_path, "rb") as f:
+        data = f.read()
+
+    # Scan for devices advertising our service
+    devices = await BleakScanner.discover(timeout=5.0, service_uuids=[SERVICE_UUID])
+
+    if not devices:
+        print("error")
+        sys.exit(1)
+
+    # Send to all devices concurrently
+    results = await asyncio.gather(*[send_to_device(d.address, data) for d in devices])
+
+    if all(results):
+        print("success")
+    else:
+        print("error")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    asyncio.run(main())

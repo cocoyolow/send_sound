@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- BLE permissions iOS -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>L'application a besoin du Bluetooth pour recevoir des sons depuis votre ordinateur.</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>L'application utilise le Bluetooth pour recevoir des fichiers son.</string>
+
+    <!-- Required background mode to keep BLE alive -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>bluetooth-peripheral</string>
+        <string>bluetooth-central</string>
+        <string>audio</string>
+    </array>
+</dict>
+</plist>

@@ -1,0 +1,16 @@
+name: sound_receiver
+description: Receives sounds via BLE and plays them.
+version: 1.0.0
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_blue_plus: ^1.31.0
+  audioplayers: ^6.0.0
+  path_provider: ^2.1.0
+
+flutter:
+  uses-material-design: true

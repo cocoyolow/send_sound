@@ -34,15 +34,11 @@ def find_sound_file(name: str) -> str | None:
 
 # ── DevicePool — persistent BLE connections ──────────────────────────────────
 
-# ── Protocol constants ────────────────────────────────────────────────────
-# With response=True, each write is ACK'd by the peripheral before the next.
-# This guarantees delivery and provides natural flow control.
-# Throughput: ~1 ACK per 10ms connection interval × 512 bytes MTU ≈ 50 KB/s
-# — enough for 128kbps MP3 (16 KB/s) with 3× headroom.
-WRITE_BATCH_SIZE = 4  # yield to event loop every N writes to avoid starvation
+# With response=True, flow control is handled by BLE ACKs — no manual batching needed.
+# Keep a small batch to avoid event-loop starvation on very fast links.
+WRITE_BATCH_SIZE = 20
 
-# 0xFF 0x00 is forbidden in MPEG audio (anti-emulation stuffing),
-# making this 8-byte sentinel impossible in any valid MP3/WAV/AAC file.
+# 8-byte sentinel impossible in valid MPEG audio (0xFF 0x00 is forbidden by the standard).
 END_SENTINEL = bytes([0xFF, 0x00, 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE])
 
 
@@ -241,50 +237,34 @@ class DevicePool:
             await client.start_notify(NOTIFY_UUID, on_notify)
             self._notified.add(address)
 
+            # ── send size header first (8 bytes little-endian int64) ─────
             import struct
             total = len(data)
-
-            # ── 1. Size header (8-byte LE int64) ────────────────────────────
-            # Sent first so the phone creates the audio stream before data arrives.
-            # response=True guarantees delivery.
             header = struct.pack("<q", total)
+            # response=True: guaranteed delivery, BLE ACK acts as flow control.
             await client.write_gatt_char(WRITE_UUID, header, response=True)
-            
-            # Flush the Linux BlueZ queues by yielding before switching to response=False.
-            # Without this, the unacknowledged data packets can race ahead of the 
-            # acknowledged header packet and arrive out-of-order at the receiver.
-            await asyncio.sleep(0.1)
 
-            # ── 2. Audio data ────────────────────────────────────────────────
-            # response=False: blast packets as fast as possible ~20KB/s
-            # The phone feeds each chunk into ExoPlayer as it arrives (streaming).
-            # Note: chunk_size MUST NEVER exceed 512 bytes, or Android's BLE stack
-            # will truncate the payload internally, discarding the extra bytes and 
-            # ruining the MP3 container format!
-            actual_chunk_size = min(chunk_size, 512)
-            
+            # ── send data in chunks ──────────────────────────────────────────
+            # response=True guarantees every packet is delivered and ACK'd.
+            # With MTU 517 and 47KB file: ~92 writes ≈ well under 1 second.
             sent = 0
             chunk_count = 0
             t0 = time.monotonic()
 
-            for i in range(0, total, actual_chunk_size):
-                chunk = data[i:i + actual_chunk_size]
-                await client.write_gatt_char(WRITE_UUID, chunk, response=False)
+            for i in range(0, total, chunk_size):
+                chunk = data[i:i + chunk_size]
+                await client.write_gatt_char(WRITE_UUID, chunk, response=True)
                 sent += len(chunk)
                 chunk_count += 1
                 if chunk_count % WRITE_BATCH_SIZE == 0:
-                    # 4 packets *(0.5KB) every 0.04 seconds = 50 KB/s.
-                    # This prevents the DBus Linux BLE socket from overflowing, 
-                    # ensuring zero silent drops while remaining fast!
-                    await asyncio.sleep(0.04)
+                    await asyncio.sleep(0)
 
             t_send = time.monotonic() - t0
             speed = (sent / 1024) / t_send if t_send > 0 else 0
-            log(f"  [{name}] {sent}/{total} o en {t_send:.2f}s "
+            log(f"  [{name}] {sent}/{total} octets envoyés en {t_send:.2f}s "
                 f"({speed:.1f} KB/s, {chunk_count} chunks), envoi sentinel...")
 
-            # ── 3. End sentinel ──────────────────────────────────────────────
-            # Tells the phone to close the stream (ExoPlayer plays out buffer).
+            # 8-byte safe sentinel — impossible in valid MP3/WAV/AAC data.
             await client.write_gatt_char(WRITE_UUID, END_SENTINEL, response=True)
 
             t1 = time.monotonic()

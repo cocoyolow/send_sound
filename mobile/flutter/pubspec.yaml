@@ -9,9 +9,10 @@ dependencies:
   flutter:
     sdk: flutter
   ble_peripheral: ^2.4.0
-  audioplayers: ^6.0.0
   path_provider: ^2.1.0
   permission_handler: ^11.0.0
+  just_audio: ^0.9.40
+  audio_session: ^0.1.25
 
 flutter:
   uses-material-design: true

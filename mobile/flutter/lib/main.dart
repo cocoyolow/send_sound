@@ -38,7 +38,7 @@ class SoundReceiverPage extends StatefulWidget {
 class _SoundReceiverPageState extends State<SoundReceiverPage> {
   final _player  = AudioPlayer();
   String _status = 'Initialisation...';
-  List<int> _buffer = [];
+  BytesBuilder _buffer = BytesBuilder(copy: false);
   bool _advertising = false;
 
   @override
@@ -91,7 +91,7 @@ class _SoundReceiverPageState extends State<SoundReceiverPage> {
               : 'Déconnecté — en attente...';
         });
         if (!connected) {
-          _buffer = [];
+          _buffer.clear();
         }
       },
     );
@@ -154,7 +154,8 @@ class _SoundReceiverPageState extends State<SoundReceiverPage> {
     if (chunk.length == 3 &&
         chunk[0] == 69 && chunk[1] == 78 && chunk[2] == 68) {
       // End of file — play the sound
-      setState(() => _status = 'Réception terminée, lecture...');
+      final size = _buffer.length;
+      setState(() => _status = 'Réception terminée ($size octets), lecture...');
       final ok = await _playBuffer();
 
       // Send confirmation via notify characteristic
@@ -169,10 +170,10 @@ class _SoundReceiverPageState extends State<SoundReceiverPage> {
         debugPrint('Erreur notification: $e');
       }
 
-      _buffer = [];
+      _buffer.clear();
     } else {
-      _buffer.addAll(chunk);
-      setState(() => _status = 'Réception: ${_buffer.length} octets...');
+      // Fast accumulation — no UI rebuild per chunk
+      _buffer.add(chunk);
     }
   }
 
@@ -180,7 +181,7 @@ class _SoundReceiverPageState extends State<SoundReceiverPage> {
     try {
       final dir  = await getTemporaryDirectory();
       final file = File('${dir.path}/recv_sound.mp3');
-      await file.writeAsBytes(_buffer);
+      await file.writeAsBytes(_buffer.toBytes());
 
       // Force audio through the phone's speaker, not via Bluetooth
       await _player.setAudioContext(AudioContext(
